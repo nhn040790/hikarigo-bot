@@ -63,9 +63,15 @@ app.post('/webhook', (req, res) => {
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
       const msg = event.message;
-      if (msg && !msg.is_echo && msg.text && !alreadyProcessed(msg.mid)) {
+      const hasContent =
+        msg &&
+        !msg.is_echo &&
+        (msg.text || msg.sticker_id || (msg.attachments && msg.attachments.length)) &&
+        !alreadyProcessed(msg.mid);
+      if (hasContent) {
         const qrPayload = msg.quick_reply && msg.quick_reply.payload;
-        handleMessage(event.sender.id, msg.text, qrPayload).catch((e) =>
+        // Tin nhan sticker/anh khong co text -> xu ly nhu tin nhan rong (van chao + goi y FAQ)
+        handleMessage(event.sender.id, msg.text || '', qrPayload).catch((e) =>
           console.error('Loi xu ly tin nhan:', e.message)
         );
       }
@@ -202,6 +208,7 @@ const menuState = new Map(); // senderId -> index danh muc dang xem
 // Nut bam "Cau hoi thuong gap" (quick reply) - tieu de toi da 20 ky tu
 const FAQ_BUTTON = { title: 'Câu hỏi thường gặp', payload: 'FAQ_MENU' };
 const BACK_BUTTON = { title: '⬅ Quay lại', payload: 'FAQ_MENU' };
+const CONSULT_BUTTON = { title: 'Tư vấn đấu giá', payload: 'CONSULT' };
 const seenCustomers = new Set(); // khach da tung nhan tin (de chao o tin nhan dau tien)
 const CATEGORY_SHORT = [
   'Giá cước & phí',
@@ -241,7 +248,7 @@ async function sendGreetingIfFirst(senderId, name) {
       '\n\nAnh/chị ấn vào nút "Câu hỏi thường gặp" bên dưới để xem các vấn đề thường gặp ạ.',
     name
   );
-  await sendMessage(senderId, greet, [FAQ_BUTTON]);
+  await sendMessage(senderId, greet, [FAQ_BUTTON, CONSULT_BUTTON]);
 }
 
 // Tra ve {handled, reply, keepMenu, quickReplies}. keepMenu=true: giu nguyen danh muc dang xem
@@ -315,6 +322,20 @@ async function handleMessage(senderId, text, payload) {
     return;
   }
 
+  // Khach an nut "Tu van dau gia" -> chuyen thang cho nhan vien tu van
+  if (payload === 'CONSULT') {
+    if (isFirstMessage) await sendGreetingIfFirst(senderId, name);
+    let consultReply = personalize(knowledge.handover_message, name);
+    if (!askedPhone.has(senderId) && !gavePhone.has(senderId)) {
+      askedPhone.add(senderId);
+      consultReply += `\n\n${phoneRequest(name)}`;
+    }
+    await sendMessage(senderId, consultReply);
+    notifyStaff(staffAlert('🚨', 'Khách cần tư vấn đấu giá/mua hộ (ấn nút)', name, text));
+    schedulePhoneFollowup(senderId, name);
+    return;
+  }
+
   // Menu danh muc cau hoi
   if (knowledge.menu) {
     const menuRes = handleMenuInput(senderId, text, name, payload);
@@ -328,9 +349,10 @@ async function handleMessage(senderId, text, payload) {
 
   const { reply, needsPhone, faqIndex, notify } = await craftReply(text);
 
-  // Nut "Cau hoi thuong gap" hien kem: khi chao khach va khi bot khong tra loi duoc
+  // Nut bam hien kem: "Cau hoi thuong gap" + "Tu van dau gia"
+  // khi chao khach va khi bot khong tra loi duoc
   let quickReplies = null;
-  if (faqIndex === 0 || notify === 'fallback') quickReplies = [FAQ_BUTTON];
+  if (faqIndex === 0 || notify === 'fallback') quickReplies = [FAQ_BUTTON, CONSULT_BUTTON];
 
   // Khach moi nhan tin lan dau (ma khong phai cau chao) -> gui loi chao truoc
   if (isFirstMessage && faqIndex !== 0) {
