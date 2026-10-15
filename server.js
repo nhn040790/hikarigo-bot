@@ -67,37 +67,128 @@ app.post('/webhook', (req, res) => {
   }
 });
 
+// ---- Thu thap so dien thoai khach (lead) de nhan vien tu van lai ----
+
+const nameCache = new Map(); // senderId -> ten
+const askedPhone = new Set(); // senderId da duoc hoi so
+const gavePhone = new Set(); // senderId da cho so
+const LEADS_FILE = new URL('./leads.json', import.meta.url);
+
+// Lay ten khach tu Meta (best-effort, co cache)
+async function getCustomerName(senderId) {
+  if (nameCache.has(senderId)) return nameCache.get(senderId);
+  try {
+    const r = await fetch(
+      `https://graph.facebook.com/v21.0/${senderId}?fields=first_name,last_name&access_token=${PAGE_ACCESS_TOKEN}`
+    );
+    const data = await r.json();
+    const name = [data.first_name, data.last_name].filter(Boolean).join(' ').trim();
+    if (name) nameCache.set(senderId, name);
+    return name || '';
+  } catch {
+    return '';
+  }
+}
+
+// Nhan dien so dien thoai Viet Nam: 0xxxxxxxxx hoac +84xxxxxxxxx
+function extractPhone(text) {
+  const m = text.replace(/[\s.]/g, '').match(/(^|\D)(0\d{9}|\+84\d{9})(\D|$)/);
+  if (!m) return '';
+  let phone = m[2];
+  if (phone.startsWith('+84')) phone = '0' + phone.slice(3);
+  return phone;
+}
+
+function saveLead(senderId, name, phone, lastMessage) {
+  const lead = {
+    senderId,
+    name: name || '',
+    phone,
+    lastMessage: lastMessage.slice(0, 200),
+    time: new Date().toISOString(),
+  };
+  try {
+    let leads = [];
+    if (fs.existsSync(LEADS_FILE)) {
+      leads = JSON.parse(fs.readFileSync(LEADS_FILE, 'utf8'));
+    }
+    // Cap nhat neu khach da co trong danh sach
+    const idx = leads.findIndex((l) => l.senderId === senderId);
+    if (idx >= 0) leads[idx] = lead;
+    else leads.push(lead);
+    fs.writeFileSync(LEADS_FILE, JSON.stringify(leads, null, 2));
+  } catch (e) {
+    console.error('Loi luu lead:', e.message);
+  }
+  // Log ro rang de xem trong Render Logs
+  console.log(`[LEAD MOI] ${name || '?'} - ${phone} - noi: "${lastMessage.slice(0, 80)}"`);
+}
+
+// Ca nhan hoa cau tra loi: thay "anh/chị" bang ten khach neu co
+function personalize(text, name) {
+  if (!name) return text;
+  return text.replaceAll('anh/chị', name).replaceAll('Anh/chị', name);
+}
+
+function phoneRequest(name) {
+  const who = name ? `${name} ` : 'anh/chị ';
+  return `Anh/chị ${who}vui lòng cho em xin số điện thoại để các bạn nhân viên bên em tư vấn hỗ trợ kỹ hơn ạ.`;
+}
+
 async function handleMessage(senderId, text) {
   console.log(`Nhan tu ${senderId}: ${text}`);
-  const reply = await craftReply(text);
-  await sendMessage(senderId, reply);
+  const name = await getCustomerName(senderId);
+
+  // Khach cho so dien thoai -> luu lead, xac nhan
+  const phone = extractPhone(text);
+  if (phone && !gavePhone.has(senderId)) {
+    gavePhone.add(senderId);
+    saveLead(senderId, name, phone, text);
+    const who = name ? ` ${name}` : ' anh/chị';
+    await sendMessage(
+      senderId,
+      `Dạ em đã ghi nhận số ${phone} của${who} ạ. Nhân viên bên em sẽ liên hệ tư vấn sớm nhất ạ.`
+    );
+    return;
+  }
+
+  const { reply, needsPhone } = await craftReply(text);
+
+  // Khi bot khong tra loi duoc / chuyen nhan vien -> xin so de tu van lai (chi hoi 1 lan)
+  let finalReply = personalize(reply, name);
+  if (needsPhone && !askedPhone.has(senderId) && !gavePhone.has(senderId)) {
+    askedPhone.add(senderId);
+    finalReply += `\n\n${phoneRequest(name)}`;
+  }
+  await sendMessage(senderId, finalReply);
 }
 
 async function craftReply(text) {
   const lower = text.toLowerCase();
 
-  // Khach muon gap nguoi that -> bao chuyen cho nhan vien
+  // Khach muon gap nguoi that -> bao chuyen cho nhan vien + xin so
   if (HANDOVER_KEYWORDS.split(',').some((k) => lower.includes(k.trim()))) {
-    return knowledge.handover_message;
+    return { reply: knowledge.handover_message, needsPhone: true };
   }
 
   // Uu tien 1: tra loi theo FAQ co san (chinh xac, khong ton chi phi AI)
   for (const item of knowledge.faqs) {
     if (item.keywords.some((k) => lower.includes(k.toLowerCase()))) {
-      return item.answer;
+      return { reply: item.answer, needsPhone: false };
     }
   }
 
   // Uu tien 2: AI tra loi tu do (can cau hinh LLM_API_URL + LLM_API_KEY)
   if (LLM_API_URL && LLM_API_KEY) {
     try {
-      return await llmReply(text);
+      return { reply: await llmReply(text), needsPhone: false };
     } catch (e) {
       console.error('LLM loi:', e.message);
     }
   }
 
-  return knowledge.fallback;
+  // Khong tra loi duoc -> xin so de nhan vien tu van
+  return { reply: knowledge.fallback, needsPhone: true };
 }
 
 // Ghep FAQ thanh boi canh de AI suy luan cau tra loi cho cau hoi moi
@@ -115,6 +206,29 @@ function buildLlmSystemPrompt() {
 }
 
 async function llmReply(userText) {
+  // Ho tro 2 chuan: Anthropic Messages API va OpenAI-compatible
+  if (LLM_API_URL.includes('anthropic.com')) {
+    const r = await fetch(LLM_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': LLM_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        max_tokens: 500,
+        system: buildLlmSystemPrompt(),
+        messages: [{ role: 'user', content: userText }],
+      }),
+    });
+    if (!r.ok) throw new Error(`Claude HTTP ${r.status}`);
+    const data = await r.json();
+    const text = data.content?.[0]?.text?.trim();
+    if (!text) throw new Error('Claude tra ve rong');
+    return text.slice(0, 1900);
+  }
+
   const r = await fetch(LLM_API_URL, {
     method: 'POST',
     headers: {
@@ -155,5 +269,15 @@ async function sendMessage(senderId, text) {
 }
 
 app.get('/health', (_req, res) => res.send('ok'));
+
+// Xem danh sach so dien thoai da thu thap (tien cho nhan vien)
+app.get('/leads', (_req, res) => {
+  try {
+    if (!fs.existsSync(LEADS_FILE)) return res.json([]);
+    return res.json(JSON.parse(fs.readFileSync(LEADS_FILE, 'utf8')));
+  } catch {
+    return res.status(500).json({ error: 'khong doc duoc leads' });
+  }
+});
 
 app.listen(PORT, () => console.log(`Bot dang chay o cong ${PORT}`));
