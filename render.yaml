@@ -17,4 +17,4 @@ services:
         sync: false
       - key: LLM_MODEL
         value: gpt-4o-mini
-        sync: false
+        
