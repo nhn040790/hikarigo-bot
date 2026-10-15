@@ -64,7 +64,8 @@ app.post('/webhook', (req, res) => {
     for (const event of entry.messaging || []) {
       const msg = event.message;
       if (msg && !msg.is_echo && msg.text && !alreadyProcessed(msg.mid)) {
-        handleMessage(event.sender.id, msg.text).catch((e) =>
+        const qrPayload = msg.quick_reply && msg.quick_reply.payload;
+        handleMessage(event.sender.id, msg.text, qrPayload).catch((e) =>
           console.error('Loi xu ly tin nhan:', e.message)
         );
       }
@@ -198,6 +199,24 @@ function schedulePhoneFollowup(senderId, name) {
 
 const menuState = new Map(); // senderId -> index danh muc dang xem
 
+// Nut bam "Cau hoi thuong gap" (quick reply) - tieu de toi da 20 ky tu
+const FAQ_BUTTON = { title: 'Câu hỏi thường gặp', payload: 'FAQ_MENU' };
+const CATEGORY_SHORT = [
+  'Giá cước & phí',
+  'Thời gian gửi hàng',
+  'Loại hàng được nhận',
+  'Cách gửi & kho Nhật',
+  'Kiểm hàng & đóng gói',
+  'Thủ tục & giao nhận',
+  'Độ uy tín',
+];
+function categoryQuickReplies() {
+  return knowledge.menu.map((c, i) => ({
+    title: (CATEGORY_SHORT[i] || c.title).slice(0, 20),
+    payload: `FAQ_CAT_${i}`,
+  }));
+}
+
 function categoryMenuText() {
   let t = 'Dạ, anh/chị chọn mục cần hỏi ạ:';
   knowledge.menu.forEach((c, i) => { t += `\n${i + 1}. ${c.title}`; });
@@ -209,16 +228,27 @@ function questionMenuText(catIdx) {
   const c = knowledge.menu[catIdx];
   let t = `Dạ, mục "${c.title}" có các câu hỏi sau ạ:`;
   c.questions.forEach((q, i) => { t += `\n${i + 1}. ${q.label}`; });
-  t += '\n\nAnh/chị nhắn số câu hỏi để xem trả lời, hoặc nhắn "menu" để về danh mục chính ạ.';
+  t += '\n\nAnh/chị nhắn số câu hỏi để xem trả lời, hoặc nhắn "Câu hỏi thường gặp" để về danh mục chính ạ.';
   return t;
 }
 
-// Tra ve {handled, reply, keepMenu}. keepMenu=true: giu nguyen danh muc dang xem
-function handleMenuInput(senderId, text, name) {
+// Tra ve {handled, reply, keepMenu, quickReplies}. keepMenu=true: giu nguyen danh muc dang xem
+function handleMenuInput(senderId, text, name, payload) {
   const t = text.trim().toLowerCase();
-  if (['menu', 'danh mục', 'danh muc', 'mục lục', 'muc luc'].includes(t)) {
+  if (
+    payload === 'FAQ_MENU' ||
+    ['câu hỏi thường gặp', 'cau hoi thuong gap', 'menu', 'danh mục', 'danh muc', 'mục lục', 'muc luc'].includes(t)
+  ) {
     menuState.delete(senderId);
-    return { handled: true, reply: categoryMenuText() };
+    return { handled: true, reply: categoryMenuText(), quickReplies: categoryQuickReplies() };
+  }
+  const catMatch = payload && /^FAQ_CAT_(\d+)$/.exec(payload);
+  if (catMatch) {
+    const idx = parseInt(catMatch[1], 10);
+    if (knowledge.menu[idx]) {
+      menuState.set(senderId, idx);
+      return { handled: true, reply: questionMenuText(idx) };
+    }
   }
   if (!/^\d{1,2}$/.test(t)) return { handled: false };
   const n = parseInt(t, 10);
@@ -248,7 +278,7 @@ function handleMenuInput(senderId, text, name) {
   };
 }
 
-async function handleMessage(senderId, text) {
+async function handleMessage(senderId, text, payload) {
   console.log(`Nhan tu ${senderId}: ${text}`);
   const name = await getCustomerName(senderId);
   lastActivity.set(senderId, Date.now());
@@ -269,9 +299,9 @@ async function handleMessage(senderId, text) {
 
   // Menu danh muc cau hoi
   if (knowledge.menu) {
-    const menuRes = handleMenuInput(senderId, text, name);
+    const menuRes = handleMenuInput(senderId, text, name, payload);
     if (menuRes.handled) {
-      await sendMessage(senderId, personalize(menuRes.reply, name));
+      await sendMessage(senderId, personalize(menuRes.reply, name), menuRes.quickReplies);
       schedulePhoneFollowup(senderId, name);
       return;
     }
@@ -279,13 +309,17 @@ async function handleMessage(senderId, text) {
 
   const { reply, needsPhone, faqIndex, notify } = await craftReply(text);
 
+  // Nut "Cau hoi thuong gap" hien kem: khi chao khach va khi bot khong tra loi duoc
+  let quickReplies = null;
+  if (faqIndex === 0 || notify === 'fallback') quickReplies = [FAQ_BUTTON];
+
   // Khi bot khong tra loi duoc / chuyen nhan vien -> xin so de tu van lai (chi hoi 1 lan)
   let finalReply = personalize(reply, name);
   if (needsPhone && !askedPhone.has(senderId) && !gavePhone.has(senderId)) {
     askedPhone.add(senderId);
     finalReply += `\n\n${phoneRequest(name)}`;
   }
-  await sendMessage(senderId, finalReply);
+  await sendMessage(senderId, finalReply, quickReplies);
 
   // Bao nhan vien qua Telegram khi can nguoi that vao
   if (notify === 'handover') {
@@ -347,9 +381,9 @@ async function craftReply(text) {
     const item = knowledge.faqs[i];
     if (item.keywords.some((k) => lower.includes(k.toLowerCase()))) {
       let reply = item.answer;
-      // Cau chao: goi y them menu danh muc
+      // Cau chao: goi y nut Cau hoi thuong gap
       if (i === 0 && knowledge.menu) {
-        reply += '\n\nAnh/chị nhắn "menu" để xem danh mục các câu hỏi thường gặp ạ.';
+        reply += '\n\nAnh/chị ấn vào nút "Câu hỏi thường gặp" bên dưới để xem các vấn đề thường gặp ạ.';
       }
       // FAQ y dinh mua cao (askPhone) -> kem loi xin SDT
       return { reply, needsPhone: !!item.askPhone, faqIndex: i };
@@ -429,7 +463,15 @@ async function llmReply(userText) {
   return text.slice(0, 1900);
 }
 
-async function sendMessage(senderId, text) {
+async function sendMessage(senderId, text, quickReplies) {
+  const message = { text: text.slice(0, 2000) };
+  if (quickReplies && quickReplies.length) {
+    message.quick_replies = quickReplies.map((q) => ({
+      content_type: 'text',
+      title: q.title.slice(0, 20),
+      payload: q.payload,
+    }));
+  }
   const r = await fetch(
     `https://graph.facebook.com/v21.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
     {
@@ -438,7 +480,7 @@ async function sendMessage(senderId, text) {
       body: JSON.stringify({
         recipient: { id: senderId },
         messaging_type: 'RESPONSE',
-        message: { text: text.slice(0, 2000) },
+        message,
       }),
     }
   );
