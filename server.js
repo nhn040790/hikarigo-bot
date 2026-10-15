@@ -386,8 +386,8 @@ function staffAlert(icon, title, name, text) {
 function containsProductLink(text) {
   const lower = text.toLowerCase();
   if (lower.includes('auctions.yahoo')) return false;
-  return /(https?:\/\/|www\.)[^\s]+/i.test(text) ||
-    /(mercari|amazon\.co\.jp|amazon\.jp|rakuten\.co\.jp|rakuten\.jp|yodobashi|cosme\.|uniqlo|muji|bookoff|paypay|shopping\.yahoo|brandavenue)/i.test(lower);
+  // Chi coi la link khi co URL that (http/https/www) - tranh nhan nham khi khach chi nhac ten san
+  return /(https?:\/\/|www\.)[^\s]+/i.test(text);
 }
 
 const LINK_RECEIVED_REPLY =
