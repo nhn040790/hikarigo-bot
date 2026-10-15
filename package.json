@@ -1,0 +1,1 @@
+{"dependencies":{"express":"^4.19.2"},"description":"Bot tu dong tra loi fanpage HikariGo qua Meta Messenger Platform","engines":{"node":">=18"},"main":"server.js","name":"hikarigo-bot","scripts":{"start":"node server.js"},"type":"module","version":"1.0.0"}
