@@ -206,9 +206,8 @@ function schedulePhoneFollowup(senderId, name) {
 const menuState = new Map(); // senderId -> index danh muc dang xem
 
 // Nut bam "Cau hoi thuong gap" (quick reply) - tieu de toi da 20 ky tu
-const FAQ_BUTTON = { title: 'Câu hỏi thường gặp', payload: 'FAQ_MENU' };
+const FAQ_BUTTON = { title: 'Tư vấn đấu giá', payload: 'FAQ_MENU' };
 const BACK_BUTTON = { title: '⬅ Quay lại', payload: 'FAQ_MENU' };
-const CONSULT_BUTTON = { title: 'Tư vấn đấu giá', payload: 'CONSULT' };
 const seenCustomers = new Set(); // khach da tung nhan tin (de chao o tin nhan dau tien)
 const CATEGORY_SHORT = [
   'Giá cước & phí',
@@ -245,10 +244,10 @@ function questionMenuText(catIdx) {
 async function sendGreetingIfFirst(senderId, name) {
   const greet = personalize(
     knowledge.faqs[0].answer +
-      '\n\nAnh/chị ấn vào nút "Câu hỏi thường gặp" bên dưới để xem các vấn đề thường gặp ạ.',
+      '\n\nAnh/chị ấn vào nút "Tư vấn đấu giá" bên dưới để xem các vấn đề thường gặp ạ.',
     name
   );
-  await sendMessage(senderId, greet, [FAQ_BUTTON, CONSULT_BUTTON]);
+  await sendMessage(senderId, greet, [FAQ_BUTTON]);
 }
 
 // Tra ve {handled, reply, keepMenu, quickReplies}. keepMenu=true: giu nguyen danh muc dang xem
@@ -256,7 +255,7 @@ function handleMenuInput(senderId, text, name, payload) {
   const t = text.trim().toLowerCase();
   if (
     payload === 'FAQ_MENU' ||
-    ['câu hỏi thường gặp', 'cau hoi thuong gap', 'menu', 'danh mục', 'danh muc', 'mục lục', 'muc luc'].includes(t)
+    ['tư vấn đấu giá', 'tu van dau gia', 'menu', 'danh mục', 'danh muc', 'mục lục', 'muc luc'].includes(t)
   ) {
     menuState.delete(senderId);
     return { handled: true, reply: categoryMenuText(), quickReplies: categoryQuickReplies() };
@@ -322,20 +321,6 @@ async function handleMessage(senderId, text, payload) {
     return;
   }
 
-  // Khach an nut "Tu van dau gia" -> chuyen thang cho nhan vien tu van
-  if (payload === 'CONSULT') {
-    if (isFirstMessage) await sendGreetingIfFirst(senderId, name);
-    let consultReply = personalize(knowledge.handover_message, name);
-    if (!askedPhone.has(senderId) && !gavePhone.has(senderId)) {
-      askedPhone.add(senderId);
-      consultReply += `\n\n${phoneRequest(name)}`;
-    }
-    await sendMessage(senderId, consultReply);
-    notifyStaff(staffAlert('🚨', 'Khách cần tư vấn đấu giá/mua hộ (ấn nút)', name, text));
-    schedulePhoneFollowup(senderId, name);
-    return;
-  }
-
   // Menu danh muc cau hoi
   if (knowledge.menu) {
     const menuRes = handleMenuInput(senderId, text, name, payload);
@@ -349,10 +334,9 @@ async function handleMessage(senderId, text, payload) {
 
   const { reply, needsPhone, faqIndex, notify } = await craftReply(text);
 
-  // Nut bam hien kem: "Cau hoi thuong gap" + "Tu van dau gia"
-  // khi chao khach va khi bot khong tra loi duoc
+  // Nut bam "Tu van dau gia" hien kem khi chao khach va khi bot khong tra loi duoc
   let quickReplies = null;
-  if (faqIndex === 0 || notify === 'fallback') quickReplies = [FAQ_BUTTON, CONSULT_BUTTON];
+  if (faqIndex === 0 || notify === 'fallback') quickReplies = [FAQ_BUTTON];
 
   // Khach moi nhan tin lan dau (ma khong phai cau chao) -> gui loi chao truoc
   if (isFirstMessage && faqIndex !== 0) {
@@ -427,9 +411,9 @@ async function craftReply(text) {
     const item = knowledge.faqs[i];
     if (item.keywords.some((k) => lower.includes(k.toLowerCase()))) {
       let reply = item.answer;
-      // Cau chao: goi y nut Cau hoi thuong gap
+      // Cau chao: goi y nut Tu van dau gia
       if (i === 0 && knowledge.menu) {
-        reply += '\n\nAnh/chị ấn vào nút "Câu hỏi thường gặp" bên dưới để xem các vấn đề thường gặp ạ.';
+        reply += '\n\nAnh/chị ấn vào nút "Tư vấn đấu giá" bên dưới để xem các vấn đề thường gặp ạ.';
       }
       // FAQ y dinh mua cao (askPhone) -> kem loi xin SDT
       return { reply, needsPhone: !!item.askPhone, faqIndex: i };
